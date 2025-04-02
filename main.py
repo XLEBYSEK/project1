@@ -1,114 +1,132 @@
-import pygame
-import sys
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
 
-pygame.init()
+# Настройка логгирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-WIDTH, HEIGHT = 800, 600
-BALL_RADIUS = 15
-PADDLE_WIDTH, PADDLE_HEIGHT = 100, 15
-BRICK_WIDTH, BRICK_HEIGHT = 75, 20
-BRICK_ROWS, BRICK_COLS = 5, 10
+# Состояния игрового поля
+EMPTY = 0
+CROSS = 1
+CIRCLE = 2
 
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
-RED = (255, 0, 0)
-GREEN = (0, 0, 255)
-BLUE = (0, 0, 255)
+# Словарь для хранения игровых досок
+games = {}
 
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Arkanoid")
+def start(update: Update, context: CallbackContext) -> None:
+    """Обработчик команды /start"""
+    user = update.effective_user
+    update.message.reply_text(f"Привет, {user.first_name}! Я бот для игры в крестики-нолики. "
+                             "Используй /newgame чтобы начать новую игру.")
 
-class Ball:
-    def __init__(self):
-        self.rect = pygame.Rect(WIDTH // 2, HEIGHT // 2, BALL_RADIUS * 2, BALL_RADIUS * 2)
-        self.speed_x = 5
-        self.speed_y = -5
+def new_game(update: Update, context: CallbackContext) -> None:
+    """Создание новой игры"""
+    chat_id = update.effective_chat.id
+    games[chat_id] = {
+        'board': [EMPTY] * 9,
+        'current_player': CROSS,
+        'winner': None
+    }
+    
+    # Создаем клавиатуру с игровым полем
+    keyboard = create_keyboard(chat_id)
+    update.message.reply_text('Новая игра! Ходят крестики (X).', reply_markup=keyboard)
 
-    def move(self):
-        self.rect.x += self.speed_x
-        self.rect.y += self.speed_y
+def create_keyboard(chat_id):
+    """Создает клавиатуру с текущим состоянием доски"""
+    board = games[chat_id]['board']
+    keyboard = []
+    
+    for i in range(0, 9, 3):
+        row = []
+        for j in range(3):
+            cell = board[i + j]
+            if cell == EMPTY:
+                text = ' '
+            elif cell == CROSS:
+                text = '❌'
+            else:
+                text = '⭕'
+            row.append(InlineKeyboardButton(text, callback_data=str(i + j)))
+        keyboard.append(row)
+    
+    return InlineKeyboardMarkup(keyboard)
 
-        if self.rect.left <0 or self.rect.right > WIDTH:
-            self.speed_x = -self.speed_x
-        if self.rect.top < 0:
-            self.speed_y = -self.speed_y
-'''
-    def reset(self):
-        self.rect.center = (WIDTH // 2, HEIGHT // 2)
-        self.speed_x = 5
-        self.speed_y = -5
-'''
-class Paddle:
-    def __init__(self):
-        self.rect = pygame.Rect(WIDTH // 2 - PADDLE_WIDTH // 2, HEIGHT - 30, PADDLE_WIDTH, PADDLE_HEIGHT)
+def button_click(update: Update, context: CallbackContext) -> None:
+    """Обработчик нажатия на кнопку"""
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    data = int(query.data)
+    
+    # Проверяем, есть ли активная игра
+    if chat_id not in games:
+        query.answer(text="Нет активной игры. Начните новую с помощью /newgame")
+        return
+    
+    game = games[chat_id]
+    
+    # Проверяем, закончена ли игра
+    if game['winner'] is not None:
+        query.answer(text="Игра уже завершена. Начните новую с помощью /newgame")
+        return
+    
+    # Проверяем, можно ли сделать ход в выбранную клетку
+    if game['board'][data] != EMPTY:
+        query.answer(text="Эта клетка уже занята!")
+        return
+    
+    # Делаем ход
+    game['board'][data] = game['current_player']
+    
+    # Проверяем, есть ли победитель
+    winner = check_winner(game['board'])
+    if winner is not None:
+        game['winner'] = winner
+        winner_text = "Крестики (X) победили!" if winner == CROSS else "Нолики (O) победили!"
+        query.edit_message_text(text=winner_text, reply_markup=create_keyboard(chat_id))
+        return
+    elif EMPTY not in game['board']:
+        # Ничья
+        game['winner'] = 'draw'
+        query.edit_message_text(text="Ничья!", reply_markup=create_keyboard(chat_id))
+        return
+    
+    # Меняем игрока
+    game['current_player'] = CIRCLE if game['current_player'] == CROSS else CROSS
+    player_text = "Ходят нолики (O)" if game['current_player'] == CIRCLE else "Ходят крестики (X)"
+    query.edit_message_text(text=player_text, reply_markup=create_keyboard(chat_id))
 
-    def move(self, dx):
-        self.rect.x += dx
-        if self.rect.left < 0:
-            self.rect.left = 0
-        if self.rect.right > WIDTH:
-            self.rect.right = WIDTH
+def check_winner(board):
+    """Проверяет, есть ли победитель"""
+    # Все возможные выигрышные комбинации
+    win_combinations = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8],  # горизонтали
+        [0, 3, 6], [1, 4, 7], [2, 5, 8],  # вертикали
+        [0, 4, 8], [2, 4, 6]              # диагонали
+    ]
+    
+    for combo in win_combinations:
+        if board[combo[0]] == board[combo[1]] == board[combo[2]] != EMPTY:
+            return board[combo[0]]
+    
+    return None
 
-class Brick:
-    def __init__(self, x, y):
-        self.rect = pygame.Rect(x, y, BRICK_WIDTH, BRICK_HEIGHT)
+def main() -> None:
+    """Запуск бота"""
+    # Замените 'YOUR_TOKEN' на токен вашего бота
+    updater = Updater("YOUR_TOKEN")
+    
+    # Регистрируем обработчики
+    updater.dispatcher.add_handler(CommandHandler("start", start))
+    updater.dispatcher.add_handler(CommandHandler("newgame", new_game))
+    updater.dispatcher.add_handler(CallbackQueryHandler(button_click))
+    
+    # Запускаем бота
+    updater.start_polling()
+    updater.idle()
 
-def main():
-    clock = pygame.time.Clock()
-    ball = Ball()
-    paddle = Paddle()
-    bricks = [Brick(x * (BRICK_WIDTH + 5) + 50, y * (BRICK_HEIGHT+5) + 50)
-              for y in range(BRICK_ROWS) for x in range(BRICK_COLS)]
-
-    score = 0
-    running = True
-
-    while running:
-        screen.fill(BLACK)
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_LEFT]:
-            paddle.move(-10)
-        if keys[pygame.K_RIGHT]:
-            paddle.move(10)
-
-        ball.move()
-
-        if ball.rect.colliderect(paddle.rect):
-            ball.speed_y = -ball.speed_y
-            ball.rect.bottom = paddle.rect.top
-
-        for brick in bricks[:]:
-            if ball.rect.colliderect(brick.rect):
-                ball.speed_y = -ball.speed_y
-                bricks.remove(brick)
-                score += 1
-
-        if ball.rect.bottom > HEIGHT:
-            print(f'Game over. Your final score is: {score}')
-            running = False
-            '''ball.reset()
-            score = 0'''
-
-        pygame.draw.ellipse(screen, RED, ball.rect)
-        pygame.draw.rect(screen, BLUE, paddle.rect)
-        for brick in bricks:
-            pygame.draw.rect(screen, GREEN, brick.rect)
-
-        font = pygame.font.Font(None, 36)
-        text = font.render(f'Score: {score}', True, WHITE)
-        screen.blit(text, (10,10))
-
-        pygame.display.flip()
-        clock.tick(60)
-
-    pygame.quit()
-    sys.exit()
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
-
